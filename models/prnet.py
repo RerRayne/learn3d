@@ -376,6 +376,7 @@ class PRNet(nn.Module):
         translation_ba_pred = torch.zeros(3, device=src.device, dtype=torch.float32).view(1, 3).repeat(batch_size, 1)
 
         total_loss = 0
+        total_mse_loss = 0
         total_feature_alignment_loss = 0
         total_cycle_consistency_loss = 0
         total_scale_consensus_loss = 0
@@ -390,8 +391,9 @@ class PRNet(nn.Module):
             translation_ba_pred = torch.matmul(rotation_ba_pred_i, translation_ba_pred.unsqueeze(2)).squeeze(2) + translation_ba_pred_i
 
             if calculate_loss:
-                loss = (F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
-                       + F.mse_loss(translation_ab_pred, translation_ab)) * self.discount_factor**i
+                mse_loss = F.mse_loss(torch.matmul(rotation_ab_pred.transpose(2, 1), rotation_ab), identity) \
+                       + F.mse_loss(translation_ab_pred, translation_ab)
+                loss = mse_loss * self.discount_factor**i
             
                 feature_alignment_loss = feature_disparity.mean() * self.feature_alignment_loss * self.discount_factor**i
                 cycle_consistency_loss = cycle_consistency(rotation_ab_pred_i, translation_ab_pred_i,
@@ -402,6 +404,7 @@ class PRNet(nn.Module):
                 total_feature_alignment_loss += feature_alignment_loss
                 total_cycle_consistency_loss += cycle_consistency_loss
                 total_loss = total_loss + loss + feature_alignment_loss + cycle_consistency_loss + scale_consensus_loss
+                total_mse_loss += mse_loss
             
             if self.input_shape == 'bnc':
                 src = transform.transform_point_cloud(src.permute(0, 2, 1), rotation_ab_pred_i, translation_ab_pred_i).permute(0, 2, 1)
@@ -418,6 +421,7 @@ class PRNet(nn.Module):
 
         if calculate_loss:
             result['loss'] = total_loss
+            result['loss_mse'] = total_mse_loss
         return result
 
 
