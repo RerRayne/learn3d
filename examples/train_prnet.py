@@ -9,9 +9,11 @@ import torch.utils.data
 import torchvision
 import wandb
 
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
+
+from ops.transform_functions import DCPTransform
 
 # Only if the files are in example folder.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +22,7 @@ if BASE_DIR[-8:] == 'examples':
     os.chdir(os.path.join(BASE_DIR, os.pardir))
 
 from learning3d.models import PRNet
-from learning3d.data_utils import RegistrationData, ModelNet40Data
+# from learning3d.data_utils import #RegistrationData, ModelNet40Data
 
 COLOR_IDS = [0, 13]
 
@@ -69,19 +71,14 @@ def get_transformations(igt):
 def test_one_epoch(device, model, test_loader, submit_pts=False):
     model.eval()
     test_loss = 0.0
-    pred = 0.0
     count = 0
-    for i, data in enumerate(tqdm(test_loader)):
-        template, source, igt = data
-        transformations = get_transformations(igt)
-        transformations = [t.to(device) for t in transformations]
-        R_ab, translation_ab, R_ba, translation_ba = transformations
+    for i, (src, dst, R_ab, t_ab) in enumerate(tqdm(test_loader)):
+        src = src.type(torch.FloatTensor).to(device)
+        dst = dst.type(torch.FloatTensor).to(device)
+        R_ab = R_ab.type(torch.FloatTensor).to(device)
+        t_ab = t_ab.type(torch.FloatTensor).to(device)
 
-        template = template.to(device)
-        source = source.to(device)
-        igt = igt.to(device)
-
-        output = model(template, source, R_ab, translation_ab.squeeze(2))
+        output = model(src, dst, R_ab, t_ab)
         loss_val = output['loss']
 
         wandb.log({
@@ -90,16 +87,26 @@ def test_one_epoch(device, model, test_loader, submit_pts=False):
         }, commit=True)
 
         if i < 10:# and submit_pts:
-            for idx in range(source.shape[0]):
-                target_point_cloud = source[idx]
-                tmp = template[idx]
+            for idx in range(src.shape[0]):
+                target_point_cloud = dst[idx]
+                tmp = src[idx]
                 predicted_point_cloud = output['transformed_source'][idx]
                 point_cloud = build_wandb_point_cloud([target_point_cloud.detach().cpu().numpy(),
                                                        predicted_point_cloud.detach().cpu().numpy(),
-                                                       tmp.detach().cpu().numpy()],
+                                                       # tmp.detach().cpu().numpy()
+                                                       ],
                                                       colors=COLOR_IDS)
                 wandb.log({
-                    "point_clouds/{:d}".format(i): wandb.Object3D(point_cloud)
+                    "point_clouds/result_{:d}".format(i): wandb.Object3D(point_cloud)
+                }, commit=True)
+
+                point_cloud = build_wandb_point_cloud([target_point_cloud.detach().cpu().numpy(),
+                                                       # predicted_point_cloud.detach().cpu().numpy(),
+                                                       tmp.detach().cpu().numpy()
+                                                       ],
+                                                      colors=COLOR_IDS)
+                wandb.log({
+                    "point_clouds/orig_{:d}".format(i): wandb.Object3D(point_cloud)
                 }, commit=True)
 
         test_loss += loss_val.item()
@@ -223,10 +230,49 @@ def options():
                         metavar='PATH', help='path to pretrained model file (default: null (no-use))')
     parser.add_argument('--device', default='cuda:0', type=str,
                         metavar='DEVICE', help='use CUDA if available')
+    parser.add_argument('--input_file', default='data/pc.npy', type=str)
 
     args = parser.parse_args()
     return args
 
+def read_sample(pathes):
+    for path in pathes:
+        data = np.fromfile(path)
+        yield data
+
+
+class RegistrationData(Dataset):
+    def __init__(self, pathes, partial_source=False, partial_template=False,
+                 noise=False, additional_params={}):
+        super(RegistrationData, self).__init__()
+
+        self.partial_template = partial_template
+        self.partial_source = partial_source
+        self.noise = noise
+        self.additional_params = additional_params
+        self.pathes = pathes
+
+        self.transforms = DCPTransform(angle_range=45, translation_range=1)
+
+    def __len__(self):
+        return len(self.pathes)
+
+    def __getitem__(self, index):
+        path = self.pathes[index]
+        with open(path, 'rb') as f:
+            data = np.load(f, allow_pickle=True).reshape(-1)[0]
+            src = torch.from_numpy(data['pts1'])
+            dst = torch.from_numpy(data['pts2'])
+
+            src_idxs = np.random.choice(list(range(src.shape[0])), size=1024, replace=False)
+            dst_idxs = src_idxs[np.random.choice(list(range(src_idxs.shape[0])), size=768, replace=False)]
+
+            src = src[src_idxs]
+            dst = dst[dst_idxs]
+
+            R = torch.from_numpy(data['R'])
+            t = torch.from_numpy(data['t'])
+        return src, dst, R, t
 
 def main():
     run = wandb.init(project="test_prnet", reinit=True)
@@ -243,11 +289,9 @@ def main():
     textio = IOStream('checkpoints/' + args.exp_name + '/run.log')
     textio.cprint(str(args))
 
-    trainset = RegistrationData('PRNet', ModelNet40Data(train=True), partial_source=True, partial_template=True)
-    testset = RegistrationData('PRNet', ModelNet40Data(train=False), partial_source=True, partial_template=True)
-    train_loader = DataLoader(trainset, batch_size=args.batch_size, shuffle=True, drop_last=True,
-                              num_workers=args.workers)
-    test_loader = DataLoader(testset, batch_size=args.test_batch_size, shuffle=False, drop_last=False,
+    # testset = RegistrationData('PRNet', ModelNet40Data(train=False), partial_source=True, partial_template=True)
+    testset = RegistrationData([args.input_file], partial_source=True, partial_template=True)
+    test_loader = DataLoader(testset, batch_size=1, shuffle=False, drop_last=False,
                              num_workers=args.workers)
 
     if not torch.cuda.is_available():
@@ -260,9 +304,7 @@ def main():
                   attention='transformer',
                   head='svd',
                   emb_dims=512,
-                  # num_keypoints=1024,
-                  # num_subsampled_points=768,
-                  num_subsampled_points=1024*4,
+                  num_subsampled_points=768,
                   cycle_consistency_loss=0.1,
                   feature_alignment_loss=0.1,
                   discount_factor=0.9)
@@ -281,11 +323,8 @@ def main():
         model.load_state_dict(torch.load(args.pretrained, map_location='cpu'))
     model.to(args.device)
 
-    if args.eval:
-        test(args, model, test_loader, textio)
-    else:
-        print("train model")
-        train(args, model, train_loader, test_loader, boardio, textio, checkpoint)
+    test(args, model, test_loader, textio)
+
     run.finish()
 
 
