@@ -84,9 +84,9 @@ def test_one_epoch(device, model, test_loader, submit_pts=False):
         wandb.log({
             'test/loss': output['loss'].detach().cpu().numpy(),
             'test/loss_mse': output['loss_mse'].detach().cpu().numpy(),
-        }, commit=True)
+        })
 
-        if i < 10:# and submit_pts:
+        if True:# and submit_pts:
             for idx in range(src.shape[0]):
                 target_point_cloud = dst[idx]
                 tmp = src[idx]
@@ -97,8 +97,8 @@ def test_one_epoch(device, model, test_loader, submit_pts=False):
                                                        ],
                                                       colors=COLOR_IDS)
                 wandb.log({
-                    "point_clouds/result_{:d}".format(i): wandb.Object3D(point_cloud)
-                }, commit=True)
+                    "point_clouds_{:d}/result".format(i): wandb.Object3D(point_cloud)
+                })
 
                 point_cloud = build_wandb_point_cloud([target_point_cloud.detach().cpu().numpy(),
                                                        # predicted_point_cloud.detach().cpu().numpy(),
@@ -106,8 +106,8 @@ def test_one_epoch(device, model, test_loader, submit_pts=False):
                                                        ],
                                                       colors=COLOR_IDS)
                 wandb.log({
-                    "point_clouds/orig_{:d}".format(i): wandb.Object3D(point_cloud)
-                }, commit=True)
+                    "point_clouds_{:d}/orig".format(i): wandb.Object3D(point_cloud)
+                })
 
         test_loss += loss_val.item()
         count += 1
@@ -230,16 +230,10 @@ def options():
                         metavar='PATH', help='path to pretrained model file (default: null (no-use))')
     parser.add_argument('--device', default='cuda:0', type=str,
                         metavar='DEVICE', help='use CUDA if available')
-    parser.add_argument('--input_file', default='data/pc.npy', type=str)
+    parser.add_argument('--input_file', nargs="+", default=['data/pc.npy'], type=str)
 
     args = parser.parse_args()
     return args
-
-def read_sample(pathes):
-    for path in pathes:
-        data = np.fromfile(path)
-        yield data
-
 
 class RegistrationData(Dataset):
     def __init__(self, pathes, partial_source=False, partial_template=False,
@@ -255,27 +249,21 @@ class RegistrationData(Dataset):
         self.transforms = DCPTransform(angle_range=45, translation_range=1)
 
     def __len__(self):
-        return len(self.pathes)
+        return 12
 
     def __getitem__(self, index):
-        path = self.pathes[index]
+        path = self.pathes[0]
         with open(path, 'rb') as f:
-            data = np.load(f, allow_pickle=True).reshape(-1)[0]
-            src = torch.from_numpy(data['pts1'])
-            dst = torch.from_numpy(data['pts2'])
+            data = np.load(f, allow_pickle=True)
+            src = torch.from_numpy(data[index]['pts1'])
+            dst = torch.from_numpy(data[index]['pts2'])
 
-            src_idxs = np.random.choice(list(range(src.shape[0])), size=1024, replace=False)
-            dst_idxs = src_idxs[np.random.choice(list(range(src_idxs.shape[0])), size=768, replace=False)]
-
-            src = src[src_idxs]
-            dst = dst[dst_idxs]
-
-            R = torch.from_numpy(data['R'])
-            t = torch.from_numpy(data['t'])
+            R = torch.from_numpy(data[index]['T'][:3, :3])
+            t = torch.from_numpy(data[index]['T'][:3, -1])
         return src, dst, R, t
 
 def main():
-    run = wandb.init(project="test_prnet", reinit=True)
+    run = wandb.init(project="prnet_normalized_hack1_15", reinit=True)
     args = options()
 
     torch.backends.cudnn.deterministic = True
@@ -290,7 +278,7 @@ def main():
     textio.cprint(str(args))
 
     # testset = RegistrationData('PRNet', ModelNet40Data(train=False), partial_source=True, partial_template=True)
-    testset = RegistrationData([args.input_file], partial_source=True, partial_template=True)
+    testset = RegistrationData(args.input_file, partial_source=True, partial_template=True)
     test_loader = DataLoader(testset, batch_size=1, shuffle=False, drop_last=False,
                              num_workers=args.workers)
 
@@ -299,7 +287,7 @@ def main():
     args.device = torch.device(args.device)
 
     # Create PointNet Model.
-    model = PRNet(num_iters=3,
+    model = PRNet(num_iters=15,
                   emb_nn='dgcnn',
                   attention='transformer',
                   head='svd',
