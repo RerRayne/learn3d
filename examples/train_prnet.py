@@ -231,6 +231,7 @@ def options():
     parser.add_argument('--device', default='cuda:0', type=str,
                         metavar='DEVICE', help='use CUDA if available')
     parser.add_argument('--input_file', nargs="+", default=['data/pc.npy'], type=str)
+    parser.add_argument('--num_iters', default=10, type=int)
 
     args = parser.parse_args()
     return args
@@ -287,7 +288,7 @@ def main():
     args.device = torch.device(args.device)
 
     # Create PointNet Model.
-    model = PRNet(num_iters=15,
+    model = PRNet(num_iters=args.num_iters,
                   emb_nn='dgcnn',
                   attention='transformer',
                   head='svd',
