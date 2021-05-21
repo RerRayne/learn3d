@@ -9,6 +9,7 @@ import h5py
 import copy
 import math
 import json
+import mrob
 import numpy as np
 from tqdm import tqdm
 import torch
@@ -21,6 +22,64 @@ from .. utils import Transformer, Identity
 from sklearn.metrics import r2_score
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+
+
+def swapXi(xi):
+    return torch.hstack([xi[3:], xi[:3]])
+
+
+def applyT(pts, T):
+    device = pts.device
+    pts_padded = torch.hstack([pts, torch.ones(pts.shape[0], 1).to(device)])
+    return torch.matmul(T.to(device), pts_padded.T)[:3].T
+
+
+# def transform_pts(pts, xi):
+#     device = pts.device
+#     xi = swapXi(xi)
+#     T = torch.tensor(
+#         mrob.geometry.SE3(xi.reshape(6, 1).cpu().numpy()).T(), device=device
+#     )
+#     return applyT(pts, T)
+
+
+def compare(xi1, xi2, device=None):
+    "xis already swapped"
+    if device is None:
+        device = xi1.device
+
+    xi1 = xi1.flatten().to(device)
+    xi2 = xi2.flatten().to(device)
+
+    # xi = swapXi(xi)
+    T1 = torch.tensor(
+        mrob.geometry.SE3(xi1.reshape(6, 1).cpu().numpy()).T(), device=device
+    )
+    T2 = torch.tensor(
+        mrob.geometry.SE3(xi2.reshape(6, 1).cpu().numpy()).T(), device=device
+    )
+
+    xi1_t = torch.tensor(T1[:3, -1], device=device)
+    xi2_t = torch.tensor(T2[:3, -1], device=device)
+
+    xi1_rot = xi1[:3]
+    xi2_rot = xi2[:3]
+
+    return (
+        torch.norm(xi1_t - xi2_t).cpu().numpy(),
+        torch.norm(xi1_rot - xi2_rot).cpu().numpy(),
+    )
+
+
+def XifromT(T, device="cpu"):
+    # print(type(T), file=sys.stderr)
+    # print(T.dtype, file=sys.stderr)
+    T = T.astype(np.float64)
+    T = mrob.geometry.SE3(T)
+    xi = torch.Tensor(T.Ln()).to(device)
+    xi = swapXi(xi)
+    return xi
 
 
 def pairwise_distance(src, tgt):
@@ -376,10 +435,12 @@ class PRNet(nn.Module):
         translation_ba_pred = torch.zeros(3, device=src.device, dtype=torch.float32).view(1, 3).repeat(batch_size, 1)
 
         total_loss = 0
-        total_mse_loss = 0
         total_feature_alignment_loss = 0
         total_cycle_consistency_loss = 0
         total_scale_consensus_loss = 0
+        total_mse_loss = []
+        total_xi_rot_losses = []
+        total_xi_t_losses = []
 
         for i in range(self.num_iters):
             rotation_ab_pred_i, translation_ab_pred_i, rotation_ba_pred_i, translation_ba_pred_i, feature_disparity = self.spam(src, tgt)
@@ -404,8 +465,17 @@ class PRNet(nn.Module):
                 total_feature_alignment_loss += feature_alignment_loss
                 total_cycle_consistency_loss += cycle_consistency_loss
                 total_loss = total_loss + loss + feature_alignment_loss + cycle_consistency_loss + scale_consensus_loss
-                total_mse_loss += mse_loss
-            
+                total_mse_loss.append(mse_loss.detach().cpu().numpy().tolist())
+
+                T_pred = transform.convert2transformation(rotation_ab_pred, translation_ab_pred).squeeze(0).detach().cpu().numpy()
+                T = transform.convert2transformation(rotation_ab, translation_ab).squeeze(0).detach().cpu().numpy()
+                xi_pred = XifromT(T_pred)
+                xi = XifromT(T)
+                loss_xi_t, loss_xi_rot = np.array(compare(xi, xi_pred)).tolist()
+                # print(loss_xi_t, file=sys.stderr)
+                total_xi_rot_losses.append(loss_xi_rot)
+                total_xi_t_losses.append(loss_xi_t)
+
             if self.input_shape == 'bnc':
                 src = transform.transform_point_cloud(src.permute(0, 2, 1), rotation_ab_pred_i, translation_ab_pred_i).permute(0, 2, 1)
             else:
@@ -418,10 +488,12 @@ class PRNet(nn.Module):
                   'est_t': translation_ab_pred,
                   'est_T': transform.convert2transformation(rotation_ab_pred, translation_ab_pred),
                   'transformed_source': src}
-
+        # print(total_xi_t_losses, total_xi_rot_losses, file=sys.stderr)
         if calculate_loss:
             result['loss'] = total_loss
             result['loss_mse'] = total_mse_loss
+            result['loss_xi_t'] = total_xi_t_losses
+            result['loss_xi_rot'] = total_xi_rot_losses
         return result
 
 

@@ -9,6 +9,8 @@ import torch.utils.data
 import torchvision
 import wandb
 
+import matplotlib.pyplot as plt
+
 from torch.utils.data import Dataset, DataLoader
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
@@ -72,6 +74,8 @@ def test_one_epoch(device, model, test_loader, submit_pts=False):
     model.eval()
     test_loss = 0.0
     count = 0
+    losses_xi_t = []
+    losses_xi_rot = []
     for i, (src, dst, R_ab, t_ab) in enumerate(tqdm(test_loader)):
         src = src.type(torch.FloatTensor).to(device)
         dst = dst.type(torch.FloatTensor).to(device)
@@ -83,34 +87,68 @@ def test_one_epoch(device, model, test_loader, submit_pts=False):
 
         wandb.log({
             'test/loss': output['loss'].detach().cpu().numpy(),
-            'test/loss_mse': output['loss_mse'].detach().cpu().numpy(),
+            'test/loss_mse': output['loss_mse'][-1],
         })
 
-        if True:# and submit_pts:
-            for idx in range(src.shape[0]):
-                target_point_cloud = dst[idx]
-                tmp = src[idx]
-                predicted_point_cloud = output['transformed_source'][idx]
-                point_cloud = build_wandb_point_cloud([target_point_cloud.detach().cpu().numpy(),
-                                                       predicted_point_cloud.detach().cpu().numpy(),
-                                                       # tmp.detach().cpu().numpy()
-                                                       ],
-                                                      colors=COLOR_IDS)
-                wandb.log({
-                    "point_clouds_{:d}/result".format(i): wandb.Object3D(point_cloud)
-                })
+        losses_xi_t.append(output['loss_xi_t'])
+        losses_xi_rot.append(output['loss_xi_rot'])
 
-                point_cloud = build_wandb_point_cloud([target_point_cloud.detach().cpu().numpy(),
-                                                       # predicted_point_cloud.detach().cpu().numpy(),
-                                                       tmp.detach().cpu().numpy()
-                                                       ],
-                                                      colors=COLOR_IDS)
-                wandb.log({
-                    "point_clouds_{:d}/orig".format(i): wandb.Object3D(point_cloud)
-                })
+        for idx in range(src.shape[0]):
+            target_point_cloud = dst[idx]
+            tmp = src[idx]
+            predicted_point_cloud = output['transformed_source'][idx]
+            point_cloud = build_wandb_point_cloud([target_point_cloud.detach().cpu().numpy(),
+                                                   predicted_point_cloud.detach().cpu().numpy(),
+                                                   # tmp.detach().cpu().numpy()
+                                                   ],
+                                                  colors=COLOR_IDS)
+            wandb.log({
+                "point_clouds_{:d}/result".format(i): wandb.Object3D(point_cloud)
+            })
+
+            point_cloud = build_wandb_point_cloud([target_point_cloud.detach().cpu().numpy(),
+                                                   # predicted_point_cloud.detach().cpu().numpy(),
+                                                   tmp.detach().cpu().numpy()
+                                                   ],
+                                                  colors=COLOR_IDS)
+            wandb.log({
+                "point_clouds_{:d}/orig".format(i): wandb.Object3D(point_cloud)
+            })
+
+            wandb.log({
+                'test/loss_xi_t'.format(i): output['loss_xi_t'][-1],
+                'test/loss_xi_rot'.format(i): output['loss_xi_rot'][-1]
+            })
 
         test_loss += loss_val.item()
         count += 1
+
+    plt.figure(figsize=(10, 10))
+    for idx, sample in enumerate(losses_xi_t):
+        plt.plot(list(range(len(sample))), sample, marker='o', label='sample_{:d}'.format(idx))
+    plt.xlabel('iter')
+    plt.ylabel('loss_xi_t')
+    plt.grid()
+    plt.legend()
+
+    wandb.log({
+        'loss_xi_t': plt,
+    })
+
+    plt.figure(figsize=(10, 10))
+    for idx, sample in enumerate(losses_xi_rot):
+        plt.plot(list(range(len(sample))), sample, marker='o', label='sample_{:d}'.format(idx))
+    plt.xlabel('iter')
+    plt.ylabel('loss_xi_rot')
+    plt.grid()
+    plt.legend()
+
+    wandb.log({
+        'loss_xi_rot': plt,
+    })
+    # for idx in range(len(losses_xi_t[0])):
+    # for sample_id in range(len(losses_xi_t)):
+
 
     test_loss = float(test_loss) / count
     return test_loss
@@ -232,6 +270,7 @@ def options():
                         metavar='DEVICE', help='use CUDA if available')
     parser.add_argument('--input_file', nargs="+", default=['data/pc.npy'], type=str)
     parser.add_argument('--num_iters', default=10, type=int)
+    parser.add_argument('--proj_name', default='nonsense', type=str)
 
     args = parser.parse_args()
     return args
@@ -264,8 +303,8 @@ class RegistrationData(Dataset):
         return src, dst, R, t
 
 def main():
-    run = wandb.init(project="prnet_normalized_hack1_15", reinit=True)
     args = options()
+    run = wandb.init(project=args.proj_name, reinit=True)
 
     torch.backends.cudnn.deterministic = True
     torch.manual_seed(args.seed)
